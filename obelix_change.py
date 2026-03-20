@@ -765,10 +765,10 @@ class OBELIX:
         weights[:4] = 1.0
         weights[12:16] = 1.0
         # Forward sensors: far bits +2, near bits +3.
-        weights[4:12][::2] = 2.0
-        weights[4:12][1::2] = 3.0
+        weights[4:12][::2] = 200.0
+        weights[4:12][1::2] = 300.0
         # Infrared sensor bit: +5.
-        weights[16] = 5.0
+        weights[16] = 500.0
 
         newly_on = sensor_bits & (~self._sensor_reward_claimed)
         if np.any(newly_on):

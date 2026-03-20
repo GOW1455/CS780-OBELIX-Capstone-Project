@@ -59,11 +59,13 @@ class DQN(nn.Module):
     def __init__(self, in_dim=18, n_actions=5):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(in_dim, 128),
+            nn.Linear(in_dim, 256),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(64, n_actions),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, n_actions),
         )
     def forward(self, x):
         return self.net(x)
@@ -101,9 +103,9 @@ def import_obelix(obelix_py: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--obelix_py", type=str, required=True)
+    ap.add_argument("--obelix_py", type=str, default="./obelix.py")
     ap.add_argument("--out", type=str, default="weights.pth")
-    ap.add_argument("--episodes", type=int, default=400)
+    ap.add_argument("--episodes", type=int, default=800)
     ap.add_argument("--max_steps", type=int, default=2000)
     ap.add_argument("--difficulty", type=int, default=0)
     ap.add_argument("--wall_obstacles", action="store_true")
@@ -113,13 +115,13 @@ def main():
 
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--batch", type=int, default=256)
-    ap.add_argument("--replay", type=int, default=100000)
+    ap.add_argument("--batch", type=int, default=128)
+    ap.add_argument("--replay", type=int, default=200000)
     ap.add_argument("--warmup", type=int, default=2000)
-    ap.add_argument("--target_sync", type=int, default=2000)
-    ap.add_argument("--eps_start", type=float, default=1.0)
-    ap.add_argument("--eps_end", type=float, default=0.05)
-    ap.add_argument("--eps_decay_steps", type=int, default=200000)
+    ap.add_argument("--target_sync", type=int, default=1000)
+    ap.add_argument("--eps_start", type=float, default=0.5)
+    ap.add_argument("--eps_end", type=float, default=0.1)
+    ap.add_argument("--eps_decay_steps", type=int, default=800000)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -132,6 +134,7 @@ def main():
 
 
     q = DQN()
+    q.load_state_dict(torch.load(args.out, map_location="cpu"))
     tgt = DQN()
     tgt.load_state_dict(q.state_dict())
     tgt.eval()
@@ -203,6 +206,8 @@ def main():
 
             if done:
                 break
+
+        torch.save(q.state_dict(), args.out)
 
         if (ep + 1) % 2 == 0:
             print(f"Episode {ep+1}/{args.episodes} return={ep_ret:.1f} eps={eps_by_step(steps):.3f} replay={len(replay)}")

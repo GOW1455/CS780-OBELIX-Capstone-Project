@@ -1,4 +1,4 @@
-"""Better DQN-style agent scaffold for OBELIX (CPU).
+﻿"""Better DQN-style agent scaffold for OBELIX (CPU).
 
 This agent is *evaluation-only*: it loads pretrained weights from a file
 placed next to agent.py inside the submission zip (weights.pth).
@@ -28,11 +28,13 @@ class DQN(nn.Module):
     def __init__(self, in_dim: int = 18, n_actions: int = 5):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(in_dim, 64),
+            nn.Linear(in_dim, 256),
             nn.ReLU(),
-            nn.Linear(64, 64),
+            nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(64, n_actions),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, n_actions),
         )
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -85,3 +87,4 @@ def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
 
     _last_action = best
     return ACTIONS[best]
+
