@@ -15,15 +15,19 @@ import torch.nn as nn
 ACTIONS: List[str] = ["L45", "L22", "FW", "R22", "R45"]
 
 class ActorCritic(nn.Module):
-    def __init__(self, in_dim=18, n_actions=5, hidden_dim=64):
+    def __init__(self, in_dim=18, n_actions=5, hidden_dim=128):
         super().__init__()
+        # Shared feature extractor
         self.fc = nn.Sequential(
-            nn.Linear(in_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, hidden_dim),
-            nn.ReLU()
+            nn.Linear(in_dim, 256),
+            nn.Tanh(), # Tanh generally provides more stable gradients for PPO than ReLU
+            nn.Linear(256, hidden_dim),
+            nn.Tanh()
         )
+        
+        # LSTM layer for partial observability
         self.lstm = nn.LSTM(hidden_dim, hidden_dim, batch_first=True)
+        
         self.actor = nn.Sequential(
             nn.Linear(hidden_dim, n_actions),
             nn.Softmax(dim=-1)
@@ -31,8 +35,10 @@ class ActorCritic(nn.Module):
         self.critic = nn.Linear(hidden_dim, 1)
 
     def forward(self, state, hidden):
+        # state must be shape: (batch_size, sequence_length, in_dim)
         x = self.fc(state)
         x, hidden = self.lstm(x, hidden)
+        
         action_probs = self.actor(x)
         state_value = self.critic(x)
         return action_probs, state_value, hidden
@@ -77,7 +83,7 @@ def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
     x = torch.tensor(obs, dtype=torch.float32).view(1, 1, -1)
     
     if _hidden_state is None:
-        _hidden_state = (torch.zeros(1, 1, 64), torch.zeros(1, 1, 64))
+        _hidden_state = (torch.zeros(1, 1, 128), torch.zeros(1, 1, 128))
     
     # Get action probabilities from the actor
     action_probs, _, _hidden_state = _model(x, _hidden_state)

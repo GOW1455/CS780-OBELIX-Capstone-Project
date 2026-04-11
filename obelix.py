@@ -609,7 +609,7 @@ class OBELIX:
             )
         self.sensor_feedback[17] = self.stuck_flag
 
-    def step(self, move, render=False):
+    def step(self, move, render=True):
         if self.done:
             return self.sensor_feedback, self.reward, self.done
 
@@ -693,7 +693,7 @@ class OBELIX:
                 self.stuck_flag = 1
                 self.active_state = "U"
 
-        if(render): self._update_frames(show=render)
+        self._update_frames(show=render)
         self.get_feedback()
         self.update_reward()
         self.check_done_state()

@@ -9,15 +9,27 @@ from torch.distributions import Categorical
 
 ACTIONS = ["L45", "L22", "FW", "R22", "R45"]
 
+def fixed_explore_action(step: int) -> tuple[int, int]:
+    """Return the scripted exploration action and the next step counter.
+
+    The sequence is 2 left turns, then 30 forward moves, then repeat while the
+    observation remains empty.
+    """
+    if step < 2:
+        return 0, step + 1  # L45
+    if step < 32:
+        return 2, step + 1  # FW
+    return 0, 1
+
 class ActorCritic(nn.Module):
-    def __init__(self, in_dim=18, n_actions=5, hidden_dim=64):
+    def __init__(self, in_dim=18, n_actions=5, hidden_dim=128):
         super().__init__()
         # Shared feature extractor
         self.fc = nn.Sequential(
-            nn.Linear(in_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, hidden_dim),
-            nn.ReLU()
+            nn.Linear(in_dim, 256),
+            nn.Tanh(), # Tanh generally provides more stable gradients for PPO than ReLU
+            nn.Linear(256, hidden_dim),
+            nn.Tanh()
         )
         
         # LSTM layer for partial observability
@@ -56,46 +68,118 @@ class RolloutBuffer:
         self.state_values.clear()
 
 class PPOAgent:
-    def __init__(self, state_dim=18, action_dim=5, lr_actor=3e-4, lr_critic=1e-3, gamma=0.99, K_epochs=4, eps_clip=0.2):
+    def __init__(self, state_dim=18, action_dim=5, lr_actor=3e-4, lr_critic=1e-3, gamma=0.99, K_epochs=4, eps_clip=0.5,
+                 epsilon_start=0.50, epsilon_end=0.02, epsilon_decay=0.9995):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
+        self.action_dim = action_dim
+
+        self.epsilon = float(epsilon_start)
+        self.epsilon_end = float(epsilon_end)
+        self.epsilon_decay = float(epsilon_decay)
         
         self.buffer = RolloutBuffer()
 
-        self.policy = ActorCritic(state_dim, action_dim)
+        self.policy = ActorCritic(state_dim, action_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr_actor)
 
-        self.policy_old = ActorCritic(state_dim, action_dim)
+        self.policy_old = ActorCritic(state_dim, action_dim).to(self.device)
         self.policy_old.load_state_dict(self.policy.state_dict())
         
         self.MseLoss = nn.MSELoss()
         
-        self.hidden_dim = 64
+        self.hidden_dim = 128
         self.reset_hidden()
 
+    def decay_epsilon(self):
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+
     def reset_hidden(self):
-        self.hidden = (torch.zeros(1, 1, self.hidden_dim),
-                       torch.zeros(1, 1, self.hidden_dim))
+        self.hidden = (torch.zeros(1, 1, self.hidden_dim).to(self.device),
+                       torch.zeros(1, 1, self.hidden_dim).to(self.device))
+        
+        # --- REPETITION BAN: Track actions per episode ---
+        self.last_action = None
+        self.consecutive_count = 0
+        self.explore_step = 0
 
     def select_action(self, state):
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).view(1, 1, -1)
+            state_tensor = torch.FloatTensor(state).view(1, 1, -1).to(self.device)
             action_probs, state_value, self.hidden = self.policy_old(state_tensor, self.hidden)
-            
+
+            # DETACH HIDDEN STATE
+            self.hidden = (self.hidden[0].detach(), self.hidden[1].detach())
+
             action_probs = action_probs.squeeze(0).squeeze(0)
             state_value = state_value.squeeze(0).squeeze(0)
 
+        if np.all(state == 0):
+            action_idx, self.explore_step = fixed_explore_action(self.explore_step)
+            dist = Categorical(action_probs)
+            action = torch.tensor(action_idx, device=self.device)
+            logprob = dist.log_prob(action)
+
+            self.buffer.states.append(torch.FloatTensor(state).to(self.device))
+            self.buffer.actions.append(action)
+            self.buffer.logprobs.append(logprob)
+            self.buffer.state_values.append(state_value)
+            return action_idx
+
+        self.explore_step = 0
+
+        # ==========================================
+        # ACTION MASKING: The Repetition Ban
+        # ==========================================
+        mask = torch.ones(5).to(self.device)
+
+        # If the same action was taken 5 times in a row, ban it for this step
+        if self.last_action is not None and self.consecutive_count >= 5:
+            mask[self.last_action] = 0.0
+
+        # Apply the mask
+        action_probs = action_probs * mask
+
+        # Re-normalize probabilities so they sum to 1.0
+        if action_probs.sum() > 0:
+            action_probs = action_probs / action_probs.sum()
+        else:
+            # Failsafe uniform distribution
+            action_probs = torch.ones(5).to(self.device) / 5.0
+        # ==========================================
+
+        # Epsilon exploration: occasionally force a random valid action.
+        if random.random() < self.epsilon:
+            valid_actions = torch.nonzero(mask > 0.0, as_tuple=False).squeeze(-1)
+            if valid_actions.numel() == 0:
+                valid_actions = torch.arange(self.action_dim, device=self.device)
+            rand_idx = torch.randint(valid_actions.numel(), (1,), device=self.device)
+            action = valid_actions[rand_idx].squeeze(0)
+            dist = Categorical(action_probs)
+            logprob = dist.log_prob(action)
+        else:
             dist = Categorical(action_probs)
             action = dist.sample()
             logprob = dist.log_prob(action)
-            
-        self.buffer.states.append(torch.FloatTensor(state))
+
+        action_idx = action.item()
+
+        # --- REPETITION BAN: UPDATE TRACKING COUNTERS ---
+        if action_idx == self.last_action:
+            self.consecutive_count += 1
+        else:
+            self.last_action = action_idx
+            self.consecutive_count = 1
+
+        self.buffer.states.append(torch.FloatTensor(state).to(self.device))
         self.buffer.actions.append(action)
         self.buffer.logprobs.append(logprob)
         self.buffer.state_values.append(state_value)
-            
-        return action.item()
+
+        return action_idx
 
     def evaluate(self, states, actions, is_terminals):
         episodes_states = []
@@ -103,7 +187,6 @@ class PPOAgent:
         curr_s = []
         curr_a = []
         
-        # Split flat buffer into sequences matching episodes
         for s, a, done in zip(states, actions, is_terminals):
             curr_s.append(s)
             curr_a.append(a)
@@ -112,7 +195,8 @@ class PPOAgent:
                 episodes_actions.append(torch.stack(curr_a))
                 curr_s = []
                 curr_a = []
-        if curr_s: # handle incomplete end
+        
+        if curr_s: 
             episodes_states.append(torch.stack(curr_s))
             episodes_actions.append(torch.stack(curr_a))
 
@@ -120,32 +204,33 @@ class PPOAgent:
         state_values_all = []
         dist_entropy_all = []
 
+        seq_chunk_size = 64 
+
         for ep_s, ep_a in zip(episodes_states, episodes_actions):
-            # Process sequence as a batch of 1
-            ep_s = ep_s.unsqueeze(0) 
+            hidden = (torch.zeros(1, 1, self.hidden_dim).to(self.device), 
+                      torch.zeros(1, 1, self.hidden_dim).to(self.device))
             
-            # Initial hidden state is zero at start of each episode sequence
-            hidden = (torch.zeros(1, 1, self.hidden_dim).to(ep_s.device), 
-                      torch.zeros(1, 1, self.hidden_dim).to(ep_s.device))
-            
-            probs, values, _ = self.policy(ep_s, hidden)
-            
-            # Remove batch dims
-            probs = probs.squeeze(0)
-            values = values.squeeze(0).squeeze(-1)
-            
-            dist = Categorical(probs)
-            logprobs = dist.log_prob(ep_a)
-            entropy = dist.entropy()
-            
-            logprobs_all.append(logprobs)
-            state_values_all.append(values)
-            dist_entropy_all.append(entropy)
-            
+            for i in range(0, len(ep_s), seq_chunk_size):
+                chunk_s = ep_s[i:i + seq_chunk_size].unsqueeze(0) 
+                chunk_a = ep_a[i:i + seq_chunk_size]
+                
+                probs, values, hidden = self.policy(chunk_s, hidden)
+                hidden = (hidden[0].detach(), hidden[1].detach())
+                
+                probs = probs.squeeze(0)
+                values = values.squeeze(0).squeeze(-1)
+                
+                dist = Categorical(probs)
+                logprobs = dist.log_prob(chunk_a)
+                entropy = dist.entropy()
+                
+                logprobs_all.append(logprobs)
+                state_values_all.append(values)
+                dist_entropy_all.append(entropy)
+                
         return torch.cat(logprobs_all), torch.cat(state_values_all), torch.cat(dist_entropy_all)
 
     def update(self):
-        # Monte Carlo estimate of returns
         rewards = []
         discounted_reward = 0
         for reward, is_terminal in zip(reversed(self.buffer.rewards), reversed(self.buffer.is_terminals)):
@@ -154,43 +239,34 @@ class PPOAgent:
             discounted_reward = reward + (self.gamma * discounted_reward)
             rewards.insert(0, discounted_reward)
             
-        # Normalizing the rewards
-        rewards = torch.tensor(rewards, dtype=torch.float32)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
         rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
 
-        # Convert list to tensor
         old_states = self.buffer.states
         old_actions = self.buffer.actions
         old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs, dim=0)).detach()
         old_state_values = torch.squeeze(torch.stack(self.buffer.state_values, dim=0)).detach()
 
-        # Calculate advantages
         advantages = rewards.detach() - old_state_values.detach()
+        
+        # ADVANTAGE NORMALIZATION
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Optimize policy for K epochs
         for _ in range(self.K_epochs):
-            # Evaluating old actions and values (uses RNN sequence correctly)
             logprobs, state_values, dist_entropy = self.evaluate(old_states, old_actions, self.buffer.is_terminals)
 
-            # Finding the ratio (pi_theta / pi_theta__old)
             ratios = torch.exp(logprobs - old_logprobs)
 
-            # Finding Surrogate Loss
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
 
-            # Final loss of clipped objective PPO
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
+            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.1 * dist_entropy
             
-            # Take gradient step
             self.optimizer.zero_grad()
             loss.mean().backward()
             self.optimizer.step()
             
-        # Copy new weights into old policy
         self.policy_old.load_state_dict(self.policy.state_dict())
-
-        # Clear buffer
         self.buffer.clear()
 
 def import_obelix(obelix_py: str):
@@ -202,7 +278,7 @@ def import_obelix(obelix_py: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--obelix_py", type=str, default="./obelix.py")
+    ap.add_argument("--obelix_py", type=str, default="./obelix_change.py")
     ap.add_argument("--out", type=str, default="ppo_weights.pth")
     ap.add_argument("--episodes", type=int, default=1000)
     ap.add_argument("--update_timestep", type=int, default=2000)
@@ -213,6 +289,9 @@ def main():
     ap.add_argument("--scaling_factor", type=int, default=5)
     ap.add_argument("--arena_size", type=int, default=500)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--epsilon_start", type=float, default=0.8)
+    ap.add_argument("--epsilon_end", type=float, default=0.02)
+    ap.add_argument("--epsilon_decay", type=float, default=0.9995)
 
     args = ap.parse_args()
 
@@ -226,17 +305,19 @@ def main():
         seed=args.seed
     )
 
-    ppo_agent = PPOAgent()
+    ppo_agent = PPOAgent(
+        epsilon_start=args.epsilon_start,
+        epsilon_end=args.epsilon_end,
+        epsilon_decay=args.epsilon_decay,
+    )
     
-    # Load previously saved weights if the file exists
     if os.path.exists(args.out):
         print(f"Loading previous weights from {args.out}...")
-        ppo_agent.policy.load_state_dict(torch.load(args.out, map_location="cpu"))
+        ppo_agent.policy.load_state_dict(torch.load(args.out, map_location=ppo_agent.device))
         ppo_agent.policy_old.load_state_dict(ppo_agent.policy.state_dict())
 
     time_step = 0
-
-    print("Training PPO agent...")
+    print(f"Training PPO agent on device: {ppo_agent.device}...")
 
     for ep in range(1, args.episodes + 1):
         state = env.reset()
@@ -246,7 +327,7 @@ def main():
 
         while not done:
             action_idx = ppo_agent.select_action(state)
-            next_state, reward, done_info = env.step(ACTIONS[action_idx])
+            next_state, reward, done_info = env.step(ACTIONS[action_idx], render=True)
             done = bool(done_info)
             
             ppo_agent.buffer.rewards.append(reward)
@@ -256,12 +337,13 @@ def main():
             ep_reward += reward
             time_step += 1
 
-            if time_step % args.update_timestep == 0:
+            if time_step >= args.update_timestep and done:
                 ppo_agent.update()
+                time_step = 0 
 
-        print(f"Episode: {ep}, Reward: {ep_reward:.2f}")
+        ppo_agent.decay_epsilon()
+        print(f"Episode: {ep}, Reward: {ep_reward:.2f}, Epsilon: {ppo_agent.epsilon:.4f}")
         
-        # Save weights every episode to protect against interruptions
         torch.save(ppo_agent.policy.state_dict(), args.out)
 
     print(f"Training completed. Final weights saved to {args.out}")

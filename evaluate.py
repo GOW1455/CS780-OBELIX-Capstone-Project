@@ -72,7 +72,7 @@ def evaluate_agent(
         done = False
         while not done:
             action = agent_policy(obs, rng)
-            obs, reward, done = env.step(action, render=True)
+            obs, reward, done = env.step(action, render=False)
             total += float(reward)
 
         scores.append(total)

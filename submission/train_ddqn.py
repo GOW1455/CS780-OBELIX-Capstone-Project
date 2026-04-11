@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse, random
 from collections import deque
 from dataclasses import dataclass
+import os
 from typing import Deque
 
 import numpy as np
@@ -54,6 +55,25 @@ import torch.nn as nn
 import torch.optim as optim
 
 ACTIONS = ["L45", "L22", "FW", "R22", "R45"]
+
+
+def sample_action_from_qs(qs: np.ndarray, rng: np.random.Generator) -> int:
+    qs = np.asarray(qs, dtype=np.float32)
+    shifted = (qs - np.max(qs))// 2.0  # for numerical stability
+    probs = np.exp(shifted)
+    probs_sum = float(np.sum(probs))
+    if not np.isfinite(probs_sum) or probs_sum <= 0.0:
+        probs = np.ones(len(ACTIONS), dtype=np.float32) / len(ACTIONS)
+    else:
+        probs = probs / probs_sum
+    return int(rng.choice(len(ACTIONS), p=probs))
+
+def fixed_explore_action(step: int) -> tuple[int, int]:
+    if step < 6:
+        return 1, (step + 1)%32
+    if step < 38:
+        return 2, (step + 1)%32
+    return 0, 1
 
 class DQN(nn.Module):
     def __init__(self, in_dim=18, n_actions=5):
@@ -115,12 +135,12 @@ def main():
 
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--batch", type=int, default=128)
+    ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--replay", type=int, default=200000)
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--target_sync", type=int, default=1000)
-    ap.add_argument("--eps_start", type=float, default=0.5)
-    ap.add_argument("--eps_end", type=float, default=0.1)
+    ap.add_argument("--eps_start", type=float, default=0.2)
+    ap.add_argument("--eps_end", type=float, default=0.01)
     ap.add_argument("--eps_decay_steps", type=int, default=800000)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -128,13 +148,15 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    rng = np.random.default_rng(args.seed)
 
     OBELIX = import_obelix(args.obelix_py)
     print("Training Double DQN agent...")
 
 
     q = DQN()
-    q.load_state_dict(torch.load(args.out, map_location="cpu"))
+    if os.path.exists(args.out):
+        q.load_state_dict(torch.load(args.out, map_location="cpu"))
     tgt = DQN()
     tgt.load_state_dict(q.state_dict())
     tgt.eval()
@@ -162,17 +184,18 @@ def main():
         )
         s = env.reset(seed=args.seed + ep)
         ep_ret = 0.0
+        explore_step = 0
 
         for _ in range(args.max_steps):
-            eps = eps_by_step(steps)
-            if np.random.rand() < eps:
-                a = np.random.randint(len(ACTIONS))
+            if np.all(s == 0):
+                a, explore_step = fixed_explore_action(explore_step)
             else:
+                explore_step = 0
                 with torch.no_grad():
                     qs = q(torch.tensor(s, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
-                a = int(np.argmax(qs))
+                a = sample_action_from_qs(qs, rng)
 
-            s2, r, done = env.step(ACTIONS[a], render=False)
+            s2, r, done = env.step(ACTIONS[a], render=True)
             ep_ret += float(r)
             replay.add(Transition(s=s, a=a, r=float(r), s2=s2, done=bool(done)))
             s = s2
@@ -209,7 +232,7 @@ def main():
 
         torch.save(q.state_dict(), args.out)
 
-        if (ep + 1) % 2 == 0:
+        if (ep + 1) % 1 == 0:
             print(f"Episode {ep+1}/{args.episodes} return={ep_ret:.1f} eps={eps_by_step(steps):.3f} replay={len(replay)}")
 
     torch.save(q.state_dict(), args.out)

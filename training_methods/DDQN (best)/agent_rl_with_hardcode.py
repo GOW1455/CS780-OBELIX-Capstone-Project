@@ -1,18 +1,7 @@
-﻿"""Better DQN-style agent scaffold for OBELIX (CPU).
+"""DQN-style agent with an exploration fallback.
 
-This agent is *evaluation-only*: it loads pretrained weights from a file
-placed next to agent.py inside the submission zip (weights.pth).
-
-Why your STD is huge:
-- if the policy is stochastic (epsilon > 0) during evaluation, scores vary a lot.
-Fix:
-- greedy action selection (epsilon=0), model.eval(), torch.no_grad().
-- optional action smoothing to reduce oscillation when Q-values are close.
-
-Submission ZIP structure:
-  submission.zip
-    agent.py
-    weights.pth
+If the observation is all zeros, it forces the agent to move forward ("FW") 
+in order to explore. Otherwise, it follows the pretrained DQN network.
 """
 
 from __future__ import annotations
@@ -36,12 +25,14 @@ class DQN(nn.Module):
             nn.ReLU(),
             nn.Linear(128, n_actions),
         )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 _model: Optional[DQN] = None
 _last_action: Optional[int] = None
 _repeat_count: int = 0
+_explore_step: int = 0
 
 _MAX_REPEAT = 2
 _CLOSE_Q_DELTA = 0.05
@@ -54,19 +45,42 @@ def _load_once():
     wpath = os.path.join(here, "weights.pth")
     if not os.path.exists(wpath):
         raise FileNotFoundError(
-            "weights.pth not found next to agent.py. Train offline and include it in the submission zip."
+            "weights.pth not found next to agent.py. Train offline and include it in the zip."
         )
     m = DQN()
     sd = torch.load(wpath, map_location="cpu")
     if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
         sd = sd["state_dict"]
+    
     m.load_state_dict(sd, strict=True)
     m.eval()
     _model = m
 
 @torch.no_grad()
 def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
-    global _last_action, _repeat_count
+    global _last_action, _repeat_count, _explore_step
+
+    # --- FORCED EXPLORATION IF STATE IS ALL ZEROS ---
+    if np.all(obs == 0):
+        if _explore_step < 2:
+            action_idx = 0  # Action index for "L45"
+            action_str = "L45"
+        elif _explore_step < 32:
+            action_idx = 2  # Action index for "FW"
+            action_str = "FW"
+        else:
+            action_idx = 0
+            action_str = "L45"
+            _explore_step = 0
+            
+        _explore_step += 1
+        _last_action = action_idx
+        return action_str
+    
+    # Reset exploration if state is not empty
+    _explore_step = 0
+
+    # --- REGULAR POLICY EVALUATION ---
     _load_once()
     x = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
     q = _model(x).squeeze(0).cpu().numpy()
@@ -87,4 +101,3 @@ def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
 
     _last_action = best
     return ACTIONS[best]
-
