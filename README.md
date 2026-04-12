@@ -129,7 +129,7 @@ Results are automatically appended to `leaderboard.csv`.
 ## Video Demonstration
 A full video demonstration of the final DDQN agent completing the test phase is available on YouTube.
 
-**[Watch the Final Agent Demonstration on YouTube]([https://youtube.com/your-link-here](https://www.youtube.com/watch?v=WYtdHCqUSno))**
+**[Watch the Final Agent Demonstration on YouTube](https://www.youtube.com/watch?v=WYtdHCqUSno)**
 
 -----
 
