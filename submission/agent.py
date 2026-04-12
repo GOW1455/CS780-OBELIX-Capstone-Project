@@ -1,32 +1,25 @@
-"""Better DQN-style agent scaffold for OBELIX (CPU).
+"""OBELIX evaluation agent with fixed explore + probabilistic Q-action selection.
 
-This agent is *evaluation-only*: it loads pretrained weights from a file
-placed next to agent.py inside the submission zip (weights.pth).
+Behavior:
+- If the observation is all zeros, use the same fixed explore pattern as train_ddqn.py.
+- Otherwise, sample actions from a probability distribution derived from Q-values.
 
-The policy samples actions from a probability distribution derived from
-the network outputs.
-
-Submission ZIP structure:
-  submission.zip
-    agent.py
-    weights.pth
+Place weights.pth next to this file for evaluation.
 """
 
 from __future__ import annotations
-from typing import List, Optional
+
+from typing import Optional
 import os
+
 import numpy as np
 import torch
 import torch.nn as nn
 
-ACTIONS: List[str] = ["L45", "L22", "FW", "R22", "R45"]
-RANDOM_ACTION_RATE = 0.15
-RANDOM_ACTION_PROBS = np.array([0.25, 0.15, 0.3, 0.15, 0.25], dtype=np.float32)
-_rap_sum = float(np.sum(RANDOM_ACTION_PROBS))
-if np.isfinite(_rap_sum) and _rap_sum > 0.0:
-    RANDOM_ACTION_PROBS = RANDOM_ACTION_PROBS / _rap_sum
-else:
-    RANDOM_ACTION_PROBS = np.ones(len(ACTIONS), dtype=np.float32) / len(ACTIONS)
+ACTIONS = ["L45", "L22", "FW", "R22", "R45"]
+RANDOM_BRANCH_PROB = 0.5
+FIXED_RANDOM_ACTION_PROBS = np.array([0.2, 0.1, 0.6, 0.1, 0], dtype=np.float32)
+
 
 class DQN(nn.Module):
     def __init__(self, in_dim: int = 18, n_actions: int = 5):
@@ -40,14 +33,40 @@ class DQN(nn.Module):
             nn.ReLU(),
             nn.Linear(128, n_actions),
         )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
+
 _model: Optional[DQN] = None
+_explore_step: int = 0
 
 
-def _sample_action_from_logits(logits: np.ndarray, rng: np.random.Generator) -> int:
-    probs = torch.softmax(torch.from_numpy(logits.astype(np.float32)), dim=0).cpu().numpy()
+def _load_once() -> None:
+    global _model
+    if _model is not None:
+        return
+
+    here = os.path.dirname(__file__)
+    wpath = os.path.join(here, "weights.pth")
+    if not os.path.exists(wpath):
+        raise FileNotFoundError(
+            "weights.pth not found next to agent_explore.py. Train offline and place weights.pth there."
+        )
+
+    model = DQN()
+    state_dict = torch.load(wpath, map_location="cpu")
+    if isinstance(state_dict, dict) and "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
+        state_dict = state_dict["state_dict"]
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
+    _model = model
+
+
+def _sample_action_from_qs(qs: np.ndarray, rng: np.random.Generator) -> int:
+    qs = np.asarray(qs, dtype=np.float32)
+    shifted = (qs - np.max(qs)) * 5.0
+    probs = np.exp(shifted)
     probs_sum = float(np.sum(probs))
     if not np.isfinite(probs_sum) or probs_sum <= 0.0:
         probs = np.ones(len(ACTIONS), dtype=np.float32) / len(ACTIONS)
@@ -55,64 +74,41 @@ def _sample_action_from_logits(logits: np.ndarray, rng: np.random.Generator) -> 
         probs = probs / probs_sum
     return int(rng.choice(len(ACTIONS), p=probs))
 
-def _load_once():
-    global _model
-    if _model is not None:
-        return
-    here = os.path.dirname(__file__)
-    wpath = os.path.join(here, "weights.pth")
-    if not os.path.exists(wpath):
-        raise FileNotFoundError(
-            "weights.pth not found next to agent.py. Train offline and include it in the submission zip."
-        )
-    m = DQN()
-    sd = torch.load(wpath, map_location="cpu")
-    if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
-        sd = sd["state_dict"]
-    m.load_state_dict(sd, strict=True)
-    m.eval()
-    _model = m
 
-step_counter = 0
-recovery_steps = 0
+def _sample_action_from_fixed_probs(rng: np.random.Generator) -> int:
+    probs = FIXED_RANDOM_ACTION_PROBS
+    probs_sum = float(np.sum(probs))
+    if not np.isfinite(probs_sum) or probs_sum <= 0.0:
+        probs = np.ones(len(ACTIONS), dtype=np.float32) / len(ACTIONS)
+    else:
+        probs = probs / probs_sum
+    return int(rng.choice(len(ACTIONS), p=probs))
+
+
+def _fixed_explore_action(step: int) -> tuple[int, int]:
+    if step < 6:
+        return 1, (step + 1) % 50
+    if step < 50:
+        return 2, (step + 1) % 50
+    return 0, 1
+
+
 @torch.no_grad()
 def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
-    global step_counter, recovery_steps
-    _load_once()
+    global _explore_step
 
-    if rng.random() < RANDOM_ACTION_RATE:
-        return ACTIONS[int(rng.choice(len(ACTIONS), p=RANDOM_ACTION_PROBS))]
+    _load_once()
+    obs = np.asarray(obs)
+
+    if np.all(obs == 0):
+        action_idx, _explore_step = _fixed_explore_action(_explore_step)
+        return ACTIONS[action_idx]
+
+    _explore_step = 0
+    if rng.random() < RANDOM_BRANCH_PROB:
+        return ACTIONS[_sample_action_from_fixed_probs(rng)]
 
     x = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-    q = _model(x).squeeze(0).cpu().numpy()
-
-    if obs[17] == 1 or recovery_steps > 0:
-        if obs[17] == 1 and recovery_steps == 0:
-            recovery_steps = 14  
-
-        recovery_steps -= 1
-        step_counter = 0
-        if recovery_steps in [13, 12, 11]:
-            return "L45"
-        return "FW"
-
-    if obs[16] == 1:
-        return "FW"
-
-    if any(obs[0:4]):
-        step_counter += 1
-        return "R45"
-    if any(obs[12:16]):
-        step_counter += 1
-        return "L45"
-
-    if any(obs[4:12]):
-        return "FW"
-
-    if step_counter < 1:
-        action = "R45"
-    else:
-        action = "FW"
-
-    step_counter = (step_counter + 1) % 70 
-    return action
+    qs = _model(x).squeeze(0).cpu().numpy()
+    action_idx = _sample_action_from_qs(qs, rng)
+    return ACTIONS[action_idx]
