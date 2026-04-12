@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 
 ACTIONS: List[str] = ["L45", "L22", "FW", "R22", "R45"]
+RANDOM_ACTION_RATE = 0.15
+RANDOM_ACTION_PROBS = np.array([0.25, 0.15, 0.3, 0.15, 0.25], dtype=np.float32)
 
 class DQN(nn.Module):
     def __init__(self, in_dim: int = 18, n_actions: int = 5):
@@ -72,47 +74,40 @@ recovery_steps = 0
 def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
     global step_counter, recovery_steps
     _load_once()
+
+    if rng.random() < RANDOM_ACTION_RATE:
+        return ACTIONS[int(rng.choice(len(ACTIONS), p=RANDOM_ACTION_PROBS))]
+
     x = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
     q = _model(x).squeeze(0).cpu().numpy()
-    
-    # PRIORITY 1: Wall Avoidance (Interleaved R45 and FW)
+
     if obs[17] == 1 or recovery_steps > 0:
         if obs[17] == 1 and recovery_steps == 0:
-            # Sequence: R45 -> FW -> R45 -> FW -> 10x FW (Total 14 steps)
             recovery_steps = 14  
-        
+
         recovery_steps -= 1
-        step_counter = 0  # Reset exploration loop
-        
-        # Steps 13 and 11: Rotate Right 45
+        step_counter = 0
         if recovery_steps in [13, 12, 11]:
             return "L45"
-        # All other recovery steps (including after each turn): Move Forward
         return "FW"
-    
-    # PRIORITY 2: Box Targeting
+
     if obs[16] == 1:
         return "FW"
-    
-    # Interleaving Forward after directional turns
-    if any(obs[0:4]):  # Box is on the left
-        # Logic: If step is even, turn; if odd, go FW
+
+    if any(obs[0:4]):
         step_counter += 1
         return "R45"
-    if any(obs[12:16]): # Box is on the right
+    if any(obs[12:16]):
         step_counter += 1
         return "L45"
-    
-    if any(obs[4:12]): # Box is ahead
+
+    if any(obs[4:12]):
         return "FW"
-    
-    # PRIORITY 3: Default Exploration (Alternating L22 and FW)
-    # This will take 5 turns of L22, each followed by a FW step
+
     if step_counter < 1:
         action = "R45"
     else:
         action = "FW"
-    
-    # Increased cycle to allow for the 10 forward steps after the turns
+
     step_counter = (step_counter + 1) % 70 
     return action

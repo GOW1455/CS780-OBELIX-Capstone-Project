@@ -44,6 +44,7 @@ For More Details please refer to https://arxiv.org/pdf/1509.06461 .
 
 from __future__ import annotations
 import argparse, random
+import csv
 from collections import deque
 from dataclasses import dataclass
 import os
@@ -55,11 +56,12 @@ import torch.nn as nn
 import torch.optim as optim
 
 ACTIONS = ["L45", "L22", "FW", "R22", "R45"]
+RANDOM_ACTION_PROBS = np.array([0.1, 0.15, 0.5, 0.15, 0.1], dtype=np.float32)
 
 
 def sample_action_from_qs(qs: np.ndarray, rng: np.random.Generator) -> int:
     qs = np.asarray(qs, dtype=np.float32)
-    shifted = (qs - np.max(qs))// 2.0  # for numerical stability
+    shifted = (qs - np.max(qs)) * 5.0  # for numerical stability
     probs = np.exp(shifted)
     probs_sum = float(np.sum(probs))
     if not np.isfinite(probs_sum) or probs_sum <= 0.0:
@@ -68,11 +70,27 @@ def sample_action_from_qs(qs: np.ndarray, rng: np.random.Generator) -> int:
         probs = probs / probs_sum
     return int(rng.choice(len(ACTIONS), p=probs))
 
+
+def sample_action_from_fixed_probs(rng: np.random.Generator) -> int:
+    probs = RANDOM_ACTION_PROBS
+    probs_sum = float(np.sum(probs))
+    if not np.isfinite(probs_sum) or probs_sum <= 0.0:
+        probs = np.ones(len(ACTIONS), dtype=np.float32) / len(ACTIONS)
+    else:
+        probs = probs / probs_sum
+    return int(rng.choice(len(ACTIONS), p=probs))
+
+
+def select_action(qs: np.ndarray, rng: np.random.Generator, epsilon: float) -> int:
+    if rng.random() < epsilon:
+        return sample_action_from_fixed_probs(rng)
+    return sample_action_from_qs(qs, rng)
+
 def fixed_explore_action(step: int) -> tuple[int, int]:
     if step < 6:
-        return 1, (step + 1)%32
-    if step < 38:
-        return 2, (step + 1)%32
+        return 1, (step + 1)%50
+    if step < 50:
+        return 2, (step + 1)%50
     return 0, 1
 
 class DQN(nn.Module):
@@ -125,6 +143,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--obelix_py", type=str, default="./obelix.py")
     ap.add_argument("--out", type=str, default="weights.pth")
+    ap.add_argument("--rewards_csv", type=str, default="training_rewards.csv")
     ap.add_argument("--episodes", type=int, default=800)
     ap.add_argument("--max_steps", type=int, default=2000)
     ap.add_argument("--difficulty", type=int, default=0)
@@ -139,9 +158,9 @@ def main():
     ap.add_argument("--replay", type=int, default=200000)
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--target_sync", type=int, default=1000)
-    ap.add_argument("--eps_start", type=float, default=0.2)
+    ap.add_argument("--eps_start", type=float, default=0.3)
     ap.add_argument("--eps_end", type=float, default=0.01)
-    ap.add_argument("--eps_decay_steps", type=int, default=800000)
+    ap.add_argument("--eps_decay_steps", type=int, default=200000)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -171,72 +190,82 @@ def main():
         frac = t / args.eps_decay_steps
         return args.eps_start + frac * (args.eps_end - args.eps_start)
 
-    for ep in range(args.episodes):
-        print(f"Episode {ep+1}/{args.episodes} starting...")
-        env = OBELIX(
-            scaling_factor=args.scaling_factor,
-            arena_size=args.arena_size,
-            max_steps=args.max_steps,
-            wall_obstacles=args.wall_obstacles,
-            difficulty=args.difficulty,
-            box_speed=args.box_speed,
-            seed=args.seed + ep,
-        )
-        s = env.reset(seed=args.seed + ep)
-        ep_ret = 0.0
-        explore_step = 0
+    csv_exists = os.path.exists(args.rewards_csv)
+    with open(args.rewards_csv, "a", newline="", encoding="utf-8") as rewards_fp:
+        csv_writer = csv.writer(rewards_fp)
+        if (not csv_exists) or os.path.getsize(args.rewards_csv) == 0:
+            csv_writer.writerow(["episode", "return", "epsilon", "replay_size", "steps"])
 
-        for _ in range(args.max_steps):
-            if np.all(s == 0):
-                a, explore_step = fixed_explore_action(explore_step)
-            else:
-                explore_step = 0
-                with torch.no_grad():
-                    qs = q(torch.tensor(s, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
-                a = sample_action_from_qs(qs, rng)
+        for ep in range(args.episodes):
+            print(f"Episode {ep+1}/{args.episodes} starting...")
+            env = OBELIX(
+                scaling_factor=args.scaling_factor,
+                arena_size=args.arena_size,
+                max_steps=args.max_steps,
+                wall_obstacles=args.wall_obstacles,
+                difficulty=args.difficulty,
+                box_speed=args.box_speed,
+                seed=args.seed + ep,
+            )
+            s = env.reset(seed=args.seed + ep*42)
+            ep_ret = 0.0
+            explore_step = 0
 
-            s2, r, done = env.step(ACTIONS[a], render=True)
-            ep_ret += float(r)
-            replay.add(Transition(s=s, a=a, r=float(r), s2=s2, done=bool(done)))
-            s = s2
-            steps += 1
+            for _ in range(args.max_steps):
+                if np.all(s == 0):
+                    a, explore_step = fixed_explore_action(explore_step)
+                else:
+                    explore_step = 0
+                    with torch.no_grad():
+                        qs = q(torch.tensor(s, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
+                    a = select_action(qs, rng, eps_by_step(steps))
 
-            if len(replay) >= max(args.warmup, args.batch):
-                sb, ab, rb, s2b, db = replay.sample(args.batch)
-                sb_t = torch.tensor(sb)
-                ab_t = torch.tensor(ab)
-                rb_t = torch.tensor(rb)
-                s2b_t = torch.tensor(s2b)
-                db_t = torch.tensor(db)
+                s2, r, done = env.step(ACTIONS[a], render=True)
+                ep_ret += float(r)
+                replay.add(Transition(s=s, a=a, r=float(r), s2=s2, done=bool(done)))
+                s = s2
+                steps += 1
 
-                with torch.no_grad():
-                    next_q = q(s2b_t)
-                    next_a = torch.argmax(next_q, dim=1)
-                    next_q_tgt = tgt(s2b_t)
-                    next_val = next_q_tgt.gather(1, next_a.unsqueeze(1)).squeeze(1)
-                    y = rb_t + args.gamma * (1.0 - db_t) * next_val
+                if len(replay) >= max(args.warmup, args.batch):
+                    sb, ab, rb, s2b, db = replay.sample(args.batch)
+                    sb_t = torch.tensor(sb)
+                    ab_t = torch.tensor(ab)
+                    rb_t = torch.tensor(rb)
+                    s2b_t = torch.tensor(s2b)
+                    db_t = torch.tensor(db)
 
-                pred = q(sb_t).gather(1, ab_t.unsqueeze(1)).squeeze(1)
-                loss = nn.functional.smooth_l1_loss(pred, y)
+                    with torch.no_grad():
+                        next_q = q(s2b_t)
+                        next_a = torch.argmax(next_q, dim=1)
+                        next_q_tgt = tgt(s2b_t)
+                        next_val = next_q_tgt.gather(1, next_a.unsqueeze(1)).squeeze(1)
+                        y = rb_t + args.gamma * (1.0 - db_t) * next_val
 
-                opt.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(q.parameters(), 5.0)
-                opt.step()
+                    pred = q(sb_t).gather(1, ab_t.unsqueeze(1)).squeeze(1)
+                    loss = nn.functional.smooth_l1_loss(pred, y)
 
-                if steps % args.target_sync == 0:
-                    tgt.load_state_dict(q.state_dict())
+                    opt.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(q.parameters(), 5.0)
+                    opt.step()
 
-            if done:
-                break
+                    if steps % args.target_sync == 0:
+                        tgt.load_state_dict(q.state_dict())
 
-        torch.save(q.state_dict(), args.out)
+                if done:
+                    break
 
-        if (ep + 1) % 1 == 0:
-            print(f"Episode {ep+1}/{args.episodes} return={ep_ret:.1f} eps={eps_by_step(steps):.3f} replay={len(replay)}")
+            torch.save(q.state_dict(), args.out)
+            ep_eps = eps_by_step(steps)
+            csv_writer.writerow([ep + 1, ep_ret, ep_eps, len(replay), steps])
+            rewards_fp.flush()
+
+            if (ep + 1) % 1 == 0:
+                print(f"Episode {ep+1}/{args.episodes} return={ep_ret:.1f} eps={ep_eps:.3f} replay={len(replay)}")
 
     torch.save(q.state_dict(), args.out)
     print("Saved:", args.out)
+    print("Rewards CSV:", args.rewards_csv)
 
 if __name__ == "__main__":
     main()

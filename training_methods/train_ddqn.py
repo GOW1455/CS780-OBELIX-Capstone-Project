@@ -61,7 +61,7 @@ RANDOM_ACTION_PROBS = np.array([0.1, 0.15, 0.5, 0.15, 0.1], dtype=np.float32)
 
 def sample_action_from_qs(qs: np.ndarray, rng: np.random.Generator) -> int:
     qs = np.asarray(qs, dtype=np.float32)
-    shifted = (qs - np.max(qs)) * 5.0  # for numerical stability
+    shifted = (qs - np.max(qs)) // 5.0  # for numerical stability
     probs = np.exp(shifted)
     probs_sum = float(np.sum(probs))
     if not np.isfinite(probs_sum) or probs_sum <= 0.0:
@@ -158,7 +158,7 @@ def main():
     ap.add_argument("--replay", type=int, default=200000)
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--target_sync", type=int, default=1000)
-    ap.add_argument("--eps_start", type=float, default=0.3)
+    ap.add_argument("--eps_start", type=float, default=0.5)
     ap.add_argument("--eps_end", type=float, default=0.01)
     ap.add_argument("--eps_decay_steps", type=int, default=200000)
     ap.add_argument("--seed", type=int, default=0)
