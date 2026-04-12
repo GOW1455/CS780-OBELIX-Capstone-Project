@@ -3,9 +3,13 @@
 [![Teaser image](OBELIX.png)](OBELIX.png)
 *The figure shows the OBELIX robot examining a box, taken from the paper ["Automatic Programming of Behaviour-based Robots using Reinforcement Learning"](https://cdn.aaai.org/AAAI/1991/AAAI91-120.pdf).*
 
+
 ## About The Project
 This repository contains the final capstone project for the **CS780 Deep Reinforcement Learning** course at IIT Kanpur. The objective is to train an autonomous agent to navigate a Partially Observable Markov Decision Process (POMDP) environment. Using only a limited 18-bit sensor array, the OBELIX robot must locate a target box, attach to it via infrared, and push it out of the arena while avoiding walls.
 
+![Environment (with wall) showing the sensors and the box needed to be pushed](Environment.png)
+
+*Environment (with wall) showing the sensors and the box needed to be pushed*
 ---
 
 ## Repository Structure
@@ -14,7 +18,8 @@ This repository contains the final capstone project for the **CS780 Deep Reinfor
 * `starter_code/` - Original course baseline files.
 * `obelix.py` - Core environment logic and physics simulator (OpenCV-based).
 * `evaluate.py` / `evaluation_video.py` - Scripts for running local testing and generating video renders.
-* `CS780_ Capstone Project.pdf` - Final project report detailing hyperparameter choices and environment dynamics.
+* `CS780_ Capstone Project.pdf` - Details of the environment and all the project information.
+* `CS780-OBELIX-Aviral-Gupta-230246-report` - Project Report containing all the implementation details.
 
 ---
 
@@ -70,11 +75,11 @@ for step in range(1, 2000):
 
 -----
 
-## 🧠 Algorithmic Approaches & The "Spin Cycle"
+## Algorithmic Approaches & The "Spin Cycle"
 
 A major challenge in this environment is **sensor aliasing** combined with harsh wall penalties. Because empty space looks identical to being safely far from a wall, early models quickly learned to exploit the environment by entering a permanent **"spin cycle"**—rotating endlessly in place to gain safe, tiny sensor rewards rather than risking a massive penalty by moving forward and hitting a wall.
 
-### 🏆 The Winning Policy: Double DQN (DDQN)
+### The Winning Policy: Double DQN (DDQN)
 
 The best-performing model was a custom **Double DQN** architecture. It successfully solved the environment by implementing:
 
@@ -82,7 +87,7 @@ The best-performing model was a custom **Double DQN** architecture. It successfu
 2.  **High-Capacity Replay Buffer:** Safely stored the extremely rare but massive positive rewards (+500 for finding the box) so the agent could learn from them repeatedly.
 3.  **Level 3 Direct Training:** Bypassed standard curriculum learning by training directly on Level 3 (moving box). The moving box naturally intersected with the robot, acting as an "exploration catalyst" to deliver free early rewards.
 
-### ❌ Failed Baselines & Alternatives
+### Failed Baselines & Alternatives
 
 Several other standard deep RL algorithms were tested, but failed to converge:
 
@@ -121,7 +126,14 @@ Results are automatically appended to `leaderboard.csv`.
 
 -----
 
-## 📚 References & Acknowledgments
+## Video Demonstration
+A full video demonstration of the final DDQN agent completing the test phase is available on YouTube.
+
+**[Watch the Final Agent Demonstration on YouTube]([https://youtube.com/your-link-here](https://www.youtube.com/watch?v=WYtdHCqUSno))**
+
+-----
+
+## References & Acknowledgments
 
   * **Original Paper:** [Automatic Programming of Behaviour-based Robots using Reinforcement Learning](https://www.google.com/url?sa=E&source=gmail&q=https://cdn.aaai.org/AAAI/1991/AAAI91-120.pdf)
   * **Base Simulator:** Codebase adapted from [iabhinavjoshi/OBELIX](https://www.google.com/search?q=https://github.com/iabhinavjoshi/OBELIX)
