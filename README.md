@@ -18,7 +18,7 @@ This repository contains the final capstone project for the **CS780 Deep Reinfor
 * `starter_code/` - Original course baseline files.
 * `obelix.py` - Core environment logic and physics simulator (OpenCV-based).
 * `evaluate.py` / `evaluation_video.py` - Scripts for running local testing and generating video renders.
-* `CS780_ Capstone Project.pdf` - Details of the environment and all the project information.
+* `CS780 Capstone Project Details.pdf` - Details of the environment and all the project information.
 * `CS780-OBELIX-Aviral-Gupta-230246-report` - Project Report containing all the implementation details.
 
 ---
