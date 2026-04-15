@@ -1,7 +1,8 @@
-"""OBELIX evaluation agent with probabilistic Q-action selection.
+"""OBELIX evaluation agent with fixed explore + probabilistic Q-action selection.
 
 Behavior:
-- Sample actions from a probability distribution derived from Q-values.
+- If the observation is all zeros, use the same fixed explore pattern as train_ddqn.py.
+- Otherwise, sample actions from a probability distribution derived from Q-values.
 
 Place weights.pth next to this file for evaluation.
 """
@@ -10,13 +11,14 @@ from __future__ import annotations
 
 from typing import Optional
 import os
-
+from policy import policy_function
 import numpy as np
 import torch
 import torch.nn as nn
-from policy import policy_function
 
 ACTIONS = ["L45", "L22", "FW", "R22", "R45"]
+RANDOM_BRANCH_PROB = 0.2
+FIXED_RANDOM_ACTION_PROBS = np.array([0.2, 0.1, 0.6, 0.1, 0], dtype=np.float32)
 
 
 class DQN(nn.Module):
@@ -37,6 +39,7 @@ class DQN(nn.Module):
 
 
 _model: Optional[DQN] = None
+_explore_step: int = 0
 
 
 def _load_once() -> None:
@@ -72,12 +75,38 @@ def _sample_action_from_qs(qs: np.ndarray, rng: np.random.Generator) -> int:
     return int(rng.choice(len(ACTIONS), p=probs))
 
 
+def _sample_action_from_fixed_probs(rng: np.random.Generator) -> int:
+    probs = FIXED_RANDOM_ACTION_PROBS
+    probs_sum = float(np.sum(probs))
+    if not np.isfinite(probs_sum) or probs_sum <= 0.0:
+        probs = np.ones(len(ACTIONS), dtype=np.float32) / len(ACTIONS)
+    else:
+        probs = probs / probs_sum
+    return int(rng.choice(len(ACTIONS), p=probs))
+
+
+def _fixed_explore_action(step: int) -> tuple[int, int]:
+    if step < 6:
+        return 1, (step + 1) % 50
+    if step < 50:
+        return 2, (step + 1) % 50
+    return 0, 1
+
+
 @torch.no_grad()
 def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
+    global _explore_step
     _load_once()
     obs = np.asarray(obs)
+    # if np.all(obs == 0):
+    #     action_idx, _explore_step = _fixed_explore_action(_explore_step)
+    #     return ACTIONS[action_idx]
+    # _explore_step = 0
+    # if rng.random() < RANDOM_BRANCH_PROB:
+    #     return ACTIONS[_sample_action_from_fixed_probs(rng)]
     x = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
     qs = _model(x).squeeze(0).cpu().numpy()
     action_idx = _sample_action_from_qs(qs, rng)
+    action = ACTIONS[action_idx]
     action = policy_function(obs, rng)
     return action

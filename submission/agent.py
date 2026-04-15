@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 ACTIONS = ["L45", "L22", "FW", "R22", "R45"]
-RANDOM_BRANCH_PROB = 0.5
+RANDOM_BRANCH_PROB = 0
 FIXED_RANDOM_ACTION_PROBS = np.array([0.2, 0.1, 0.6, 0.1, 0], dtype=np.float32)
 
 
@@ -96,19 +96,16 @@ def _fixed_explore_action(step: int) -> tuple[int, int]:
 @torch.no_grad()
 def policy(obs: np.ndarray, rng: np.random.Generator) -> str:
     global _explore_step
-
     _load_once()
     obs = np.asarray(obs)
-
-    if np.all(obs == 0):
-        action_idx, _explore_step = _fixed_explore_action(_explore_step)
-        return ACTIONS[action_idx]
-
-    _explore_step = 0
-    if rng.random() < RANDOM_BRANCH_PROB:
-        return ACTIONS[_sample_action_from_fixed_probs(rng)]
-
+    # if np.all(obs == 0):
+    #     action_idx, _explore_step = _fixed_explore_action(_explore_step)
+    #     return ACTIONS[action_idx]
+    # _explore_step = 0
+    # if rng.random() < RANDOM_BRANCH_PROB:
+    #     return ACTIONS[_sample_action_from_fixed_probs(rng)]
     x = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
     qs = _model(x).squeeze(0).cpu().numpy()
     action_idx = _sample_action_from_qs(qs, rng)
-    return ACTIONS[action_idx]
+    action = ACTIONS[action_idx]
+    return action
