@@ -212,14 +212,17 @@ def main():
             explore_step = 0
 
             for _ in range(args.max_steps):
-                if np.all(s == 0):
-                    a, explore_step = fixed_explore_action(explore_step)
-                else:
-                    explore_step = 0
-                    with torch.no_grad():
-                        qs = q(torch.tensor(s, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
-                    a = select_action(qs, rng, eps_by_step(steps))
-
+                # if np.all(s == 0):
+                #     a, explore_step = fixed_explore_action(explore_step)
+                # else:
+                #     explore_step = 0
+                #     with torch.no_grad():
+                #         qs = q(torch.tensor(s, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
+                #     a = select_action(qs, rng, eps_by_step(steps))
+                with torch.no_grad():
+                    qs = q(torch.tensor(s, dtype=torch.float32).unsqueeze(0)).squeeze(0).numpy()
+                a = select_action(qs, rng, eps_by_step(steps))
+                
                 s2, r, done = env.step(ACTIONS[a], render=True)
                 ep_ret += float(r)
                 replay.add(Transition(s=s, a=a, r=float(r), s2=s2, done=bool(done)))
